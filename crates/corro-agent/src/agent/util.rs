@@ -69,6 +69,9 @@ use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, trace, warn};
 use tripwire::{Outcome, PreemptibleFutureExt, Tripwire};
 
+#[cfg(any(test, feature = "antithesis"))]
+use corro_types::change::Change;
+
 pub async fn initialise_foca(agent: &Agent, states: Vec<(SocketAddr, Member<Actor>)>) {
     if !states.is_empty() {
         let mut foca_states = BTreeMap::<SocketAddr, Member<Actor>>::new();
@@ -1276,12 +1279,16 @@ pub fn process_complete_version<T: Deref<Target = rusqlite::Connection> + Commit
 
     debug!(%actor_id, %version, "complete change, applying right away! seqs: {seqs:?}, last_seq: {last_seq}, changes len: {len}, db version: {version}");
 
-    let details = json!({"len": len, "seqs": seqs.start_int(), "seqs_end": seqs.end_int(), "actor_id": actor_id, "version": version});
-    assert_always!(
-        len <= seqs.len(),
-        "number of changes is equal to the seq len",
-        &details
-    );
+
+    // special casing to avoid failures for a known case in cr-sqlite.
+    // when a row gets resurrected, we use the same seq for the sentinel row
+    // and the row being inserted, so the array would have two rows with the same seq.
+    #[cfg(feature = "antithesis")]
+    if len != seqs.len() && !check_resurrect_duplicates(&changes) {
+        let details = json!({"len": len, "seqs": seqs.start_int(), "seqs_end": seqs.end_int(), "actor_id": actor_id, "version": version});
+        assert_unreachable!("number of changes is not equal to the seq range", &details);
+    }
+
     debug_assert!(len <= seqs.len(), "change from actor {actor_id} version {version} has len {len} but seqs range is {seqs:?} and last_seq is {last_seq}");
 
     // Insert all the changes in a single statement
@@ -1442,4 +1449,101 @@ fn is_pow_10(i: u64) -> bool {
         i,
         1 | 10 | 100 | 1000 | 10000 | 1000000 | 10000000 | 100000000
     )
+}
+
+#[cfg(any(test, feature = "antithesis"))]
+fn check_resurrect_duplicates(changes: &[Change]) -> bool {
+    if changes.len() < 2 {
+        return false;
+    }
+    // array is already sorted so we just need to check the previous change
+    // return true if we have two rows with same pk, seq and either is a sentinel.
+    changes.windows(2).any(|window| {
+        // we are sure windows would always two
+        window[0].pk == window[1].pk
+            && window[0].table == window[1].table
+            && window[0].seq == window[1].seq
+            && (window[0].cid.is_crsql_sentinel() || window[1].cid.is_crsql_sentinel())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use corro_api_types::SqliteValue;
+    use corro_types::{
+        api::{ColumnName, TableName},
+        base::CrsqlSeq,
+        change::Change,
+    };
+
+    fn make_change(table: &str, pk: &[u8], seq: u64, cid: &str) -> Change {
+        Change {
+            table: TableName::from(table),
+            pk: pk.to_vec(),
+            cid: ColumnName::from(cid),
+            val: SqliteValue::Null,
+            col_version: 0,
+            db_version: CrsqlDbVersion(1),
+            seq: CrsqlSeq(seq),
+            site_id: [0; 16],
+            cl: 0,
+        }
+    }
+
+    #[test]
+    fn test_check_resurrect_duplicates() {
+        let changes = vec![];
+        assert!(!check_resurrect_duplicates(&changes));
+
+        let changes = vec![make_change("table1", b"pk1", 0, "col1")];
+        assert!(!check_resurrect_duplicates(&changes));
+
+        let changes = vec![
+            make_change("table1", b"pk1", 0, "col1"),
+            make_change("table1", b"pk1", 1, "col2"),
+        ];
+        assert!(!check_resurrect_duplicates(&changes));
+
+        let changes = vec![
+            make_change("table1", b"pk1", 0, "col1"),
+            make_change("table1", b"pk1", 1, "col2"),
+            make_change("table1", b"pk1", 2, "col3"),
+        ];
+        assert!(!check_resurrect_duplicates(&changes));
+
+        let changes = vec![
+            make_change("table1", b"pk1", 0, "-1"),
+            make_change("table1", b"pk1", 0, "col1"),
+            make_change("table1", b"pk1", 1, "col2"),
+            make_change("table1", b"pk1", 2, "col3"),
+        ];
+        assert!(check_resurrect_duplicates(&changes));
+
+        let changes = vec![
+            make_change("table1", b"pk2", 1, "col1"),
+            make_change("table1", b"pk1", 5, "-1"),
+            make_change("table1", b"pk1", 5, "col6"),
+            make_change("table1", b"pk1", 6, "col5"),
+        ];
+        assert!(check_resurrect_duplicates(&changes));
+
+        // different pk, should evaluate to false
+        let changes = vec![
+            make_change("table1", b"pk2", 0, "-1"),
+            make_change("table1", b"pk1", 0, "col1"),
+            make_change("table1", b"pk1", 1, "col2"),
+            make_change("table1", b"pk1", 2, "col3"),
+        ];
+        assert!(!check_resurrect_duplicates(&changes));
+
+        // different table, should evaluate to false
+        let changes = vec![
+            make_change("table2", b"pk1", 0, "-1"),
+            make_change("table1", b"pk1", 0, "col1"),
+            make_change("table1", b"pk1", 1, "col2"),
+            make_change("table1", b"pk1", 2, "col3"),
+        ];
+        assert!(!check_resurrect_duplicates(&changes));
+    }
 }

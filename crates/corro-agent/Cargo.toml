@@ -70,6 +70,7 @@ governor.workspace = true
 
 [dev-dependencies]
 corro-tests = { path = "../corro-tests" }
+corro-api-types = { path = "../corro-api-types" }
 reqwest.workspace = true
 http-body = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
@@ -77,3 +78,6 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 [[bench]]
 name = "process_changes"
 harness = false
+
+[features]
+antithesis = ["antithesis_sdk/full"]

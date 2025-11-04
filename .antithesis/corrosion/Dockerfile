@@ -44,7 +44,7 @@ ENV RUSTFLAGS="--cfg tokio_unstable -C link-arg=-fuse-ld=mold -C force-frame-poi
 # Will build and cache the binary and dependent crates in release mode
 RUN --mount=type=cache,target=/usr/local/cargo,from=rust:bookworm,source=/usr/local/cargo \
     --mount=type=cache,target=target \
-    cargo build --release --features running_in_antithesis && mv target/release/corrosion ./ && mv target/release/rust-load-generator ./
+    cargo build --release --features antithesis && mv target/release/corrosion ./ && mv target/release/rust-load-generator ./
 
 # Runtime image
 FROM debian:bookworm-slim
