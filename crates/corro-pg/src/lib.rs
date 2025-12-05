@@ -602,6 +602,7 @@ pub async fn start(
                         debug!("received startup message: {startup:?}");
                     }
                     _ => {
+                        error!("expected startup message, got {msg:?}");
                         framed
                             .send(PgWireBackendMessage::ErrorResponse(
                                 ErrorInfo::new(
