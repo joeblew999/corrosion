@@ -605,6 +605,8 @@ fn main() {
         eprintln!("{e}");
         std::process::exit(1);
     }
+
+    println!("runtime is donee")
 }
 
 #[derive(Parser)]
