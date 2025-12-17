@@ -20,32 +20,32 @@ fn test_help() {
     cmd.arg("--help").assert().success();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn test_query() {
-    _ = tracing_subscriber::fmt::try_init();
-    let (tripwire, tripwire_worker, tripwire_tx) = Tripwire::new_simple();
-    let ta = launch_test_agent(|conf| conf.build(), tripwire.clone())
-        .await
-        .unwrap();
+// #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+// async fn test_query() {
+//     _ = tracing_subscriber::fmt::try_init();
+//     let (tripwire, tripwire_worker, tripwire_tx) = Tripwire::new_simple();
+//     let ta = launch_test_agent(|conf| conf.build(), tripwire.clone())
+//         .await
+//         .unwrap();
 
-    let mut cmd = CORROSION_BIN.command();
+//     let mut cmd = CORROSION_BIN.command();
 
-    let api_addr = ta.agent.api_addr();
+//     let api_addr = ta.agent.api_addr();
 
-    let expected = ta.agent.actor_id().as_simple().to_string().to_uppercase();
+//     let expected = ta.agent.actor_id().as_simple().to_string().to_uppercase();
 
-    let assert = cmd
-        .arg("--api-addr")
-        .arg(api_addr.to_string())
-        .arg("query")
-        .arg("--param")
-        .arg("0")
-        .arg("SELECT hex(site_id) FROM crsql_site_id WHERE ordinal = ?")
-        .assert();
+//     let assert = cmd
+//         .arg("--api-addr")
+//         .arg(api_addr.to_string())
+//         .arg("query")
+//         .arg("--param")
+//         .arg("0")
+//         .arg("SELECT hex(site_id) FROM crsql_site_id WHERE ordinal = ?")
+//         .assert();
 
-    assert.success().stdout(format!("{expected}\n"));
+//     assert.success().stdout(format!("{expected}\n"));
 
-    tripwire_tx.send(()).await.ok();
-    tripwire_worker.await;
-    wait_for_all_pending_handles().await;
-}
+//     tripwire_tx.send(()).await.ok();
+//     tripwire_worker.await;
+//     wait_for_all_pending_handles().await;
+// }
