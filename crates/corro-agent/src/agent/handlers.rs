@@ -807,8 +807,16 @@ pub async fn handle_changes(
         }
 
         if let Some(recv_lag) = recv_lag {
+            let recv_lag_secs = recv_lag.as_secs_f64();
+            if recv_lag_secs > 2.0 {
+                warn!(
+                    "recv lag is too high: {recv_lag_secs:?} from {:?} versions: {:?}",
+                    change.actor_id,
+                    change.versions()
+                );
+            }
             histogram!("corro.agent.changes.recv.lag.seconds", "source" => src_str)
-                .record(recv_lag.as_secs_f64());
+                .record(recv_lag_secs);
         }
 
         // this will only run once for a non-empty changeset
