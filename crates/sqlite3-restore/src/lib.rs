@@ -298,11 +298,10 @@ fn lock(f: &File, l_type: LockType, l_start: i64, timeout: Duration) -> Result<(
 
     let started_at = Instant::now();
     loop {
-        let mut overlapped = std::mem::zeroed::<windows_sys::Win32::System::IO::OVERLAPPED>();
-        overlapped.Anonymous.Anonymous.Offset = offset_low;
-        overlapped.Anonymous.Anonymous.OffsetHigh = offset_high;
-
         let result = unsafe {
+            let mut overlapped = std::mem::zeroed::<windows_sys::Win32::System::IO::OVERLAPPED>();
+            overlapped.Anonymous.Anonymous.Offset = offset_low;
+            overlapped.Anonymous.Anonymous.OffsetHigh = offset_high;
             match l_type {
                 LockType::Unlock => {
                     UnlockFileEx(handle, 0, l_len, 0, &mut overlapped)

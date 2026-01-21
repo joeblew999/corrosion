@@ -49,18 +49,8 @@ impl Stream for SignalStream {
     type Item = ();
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<()>> {
-        #[cfg(unix)]
-        {
-            self.inner.poll_recv(cx)
-        }
-        #[cfg(windows)]
-        {
-            match Pin::new(&mut self.inner).poll(cx) {
-                Poll::Ready(Ok(())) => Poll::Ready(Some(())),
-                Poll::Ready(Err(_)) => Poll::Ready(None),
-                Poll::Pending => Poll::Pending,
-            }
-        }
+        // Both Unix Signal and Windows CtrlC implement poll_recv
+        self.inner.poll_recv(cx)
     }
 }
 
