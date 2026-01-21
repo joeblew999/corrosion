@@ -40,7 +40,6 @@ spawn = { path = "../spawn" }
 sqlite3-restore = { path = "../sqlite3-restore" }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tikv-jemallocator = "0.5"
 time = { workspace = true }
 tokio = { workspace = true }
 tokio-metrics = { workspace = true }
@@ -57,6 +56,9 @@ metrics-util = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libsystemd = "0.7.0"
+
+[target.'cfg(unix)'.dependencies]
+tikv-jemallocator = "0.5"
 
 [build-dependencies]
 build-info-build = { workspace = true }

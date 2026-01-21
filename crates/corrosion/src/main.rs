@@ -45,6 +45,7 @@ pub static API_CLIENT: OnceCell<CorrosionApiClient> = OnceCell::new();
 
 build_info::build_info!(pub fn version);
 
+#[cfg(unix)]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
