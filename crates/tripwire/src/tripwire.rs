@@ -1,14 +1,14 @@
 use futures::stream::Stream;
+#[cfg(unix)]
 use futures_util::stream::{select, Select};
 use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::{
-    signal::unix::{signal, SignalKind},
-    sync::{mpsc, watch},
-};
+use tokio::sync::{mpsc, watch};
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
 use tokio_stream::wrappers::{ReceiverStream, WatchStream};
 use tracing::{debug, warn};
 
@@ -50,11 +50,19 @@ impl Tripwire {
         (tw, w, tx)
     }
 
-    /// Listen for SIGTERM and SIGINT
+    /// Listen for SIGTERM and SIGINT (Unix) or Ctrl-C (Windows)
+    #[cfg(unix)]
     pub fn new_signals() -> (Self, TripwireWorker<Select<SignalStream, SignalStream>>) {
         let sigterms = SignalStream::new(signal(SignalKind::terminate()).unwrap());
         let sigints = SignalStream::new(signal(SignalKind::interrupt()).unwrap());
         Self::new(select(sigterms, sigints))
+    }
+
+    /// Listen for Ctrl-C on Windows
+    #[cfg(windows)]
+    pub fn new_signals() -> (Self, TripwireWorker<SignalStream>) {
+        let ctrl_c = SignalStream::new(tokio::signal::windows::ctrl_c().unwrap());
+        Self::new(ctrl_c)
     }
 
     /// Returns an Arc of the current [TripwireState]

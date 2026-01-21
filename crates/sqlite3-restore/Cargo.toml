@@ -4,9 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-nix = { version = "0.30", features = ["fs"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [dev-dependencies]
 rusqlite = { workspace = true }

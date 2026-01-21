@@ -1,15 +1,22 @@
 use std::{
     fs::File,
     io::{Read, Seek},
-    os::{fd::AsRawFd, unix::prelude::FileExt},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use std::os::{fd::AsRawFd, unix::prelude::FileExt};
+
+#[cfg(windows)]
+use std::os::windows::prelude::FileExt;
+
+#[cfg(unix)]
 use nix::{
     fcntl::{fcntl, FcntlArg},
     libc::{flock, SEEK_SET},
 };
+
 use tracing::info;
 
 // Database file lock bytes.
@@ -46,6 +53,10 @@ pub enum Error {
 
     #[error("database read and write format mismatched: {read} != {write}")]
     ReadWriteFormatMismatch { read: u8, write: u8 },
+
+    #[cfg(windows)]
+    #[error("windows locking error: {0}")]
+    WindowsLock(String),
 }
 
 pub struct Restored {
@@ -111,7 +122,7 @@ pub fn restore<P1: AsRef<Path>, P2: AsRef<Path>>(
     copy_check(&mut src_db_file, &mut dst_db_file, src_meta.len())?;
 
     if let Locked::Wal(ref mut dst_shm_file) = dst_locked {
-        dst_shm_file.write_at(&[0; 136], 0)?;
+        write_at_offset(dst_shm_file, &[0; 136], 0)?;
     }
 
     info!("done");
@@ -121,6 +132,19 @@ pub fn restore<P1: AsRef<Path>, P2: AsRef<Path>>(
         new_len: src_meta.len(),
         is_wal: dst_locked.is_wal(),
     })
+}
+
+/// Cross-platform write at offset
+#[cfg(unix)]
+fn write_at_offset(file: &mut File, buf: &[u8], offset: u64) -> Result<(), Error> {
+    file.write_at(buf, offset)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn write_at_offset(file: &mut File, buf: &[u8], offset: u64) -> Result<(), Error> {
+    file.seek_write(buf, offset)?;
+    Ok(())
 }
 
 fn copy_check(src: &mut File, dst: &mut File, len: u64) -> Result<(), Error> {
@@ -199,11 +223,21 @@ pub fn lock_all<P: AsRef<Path>>(
 #[derive(Debug, Clone, Copy)]
 #[repr(i16)]
 enum LockType {
+    #[cfg(unix)]
     Read = nix::libc::F_RDLCK as i16,
+    #[cfg(unix)]
     Write = nix::libc::F_WRLCK as i16,
+    #[cfg(unix)]
     Unlock = nix::libc::F_UNLCK as i16,
+    #[cfg(windows)]
+    Read = 0,
+    #[cfg(windows)]
+    Write = 1,
+    #[cfg(windows)]
+    Unlock = 2,
 }
 
+#[cfg(unix)]
 fn lock(f: &File, l_type: LockType, l_start: i64, timeout: Duration) -> Result<(), Error> {
     let mut l_len = 1i64;
 
@@ -238,6 +272,68 @@ fn lock(f: &File, l_type: LockType, l_start: i64, timeout: Duration) -> Result<(
         if started_at.elapsed() > timeout {
             return Err(Error::LockTimedOut);
         }
+    }
+}
+
+#[cfg(windows)]
+fn lock(f: &File, l_type: LockType, l_start: i64, timeout: Duration) -> Result<(), Error> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+
+    let mut l_len = 1u32;
+    if l_start == SHARED {
+        l_len = 510;
+    }
+
+    let handle = f.as_raw_handle() as HANDLE;
+    let offset_low = (l_start & 0xFFFFFFFF) as u32;
+    let offset_high = ((l_start >> 32) & 0xFFFFFFFF) as u32;
+
+    info!(
+        "acquiring lock ({l_type:?},offset={l_start},len={l_len}) on handle",
+    );
+
+    let started_at = Instant::now();
+    loop {
+        let mut overlapped = std::mem::zeroed::<windows_sys::Win32::System::IO::OVERLAPPED>();
+        overlapped.Anonymous.Anonymous.Offset = offset_low;
+        overlapped.Anonymous.Anonymous.OffsetHigh = offset_high;
+
+        let result = unsafe {
+            match l_type {
+                LockType::Unlock => {
+                    UnlockFileEx(handle, 0, l_len, 0, &mut overlapped)
+                }
+                LockType::Read => {
+                    LockFileEx(handle, LOCKFILE_FAIL_IMMEDIATELY, 0, l_len, 0, &mut overlapped)
+                }
+                LockType::Write => {
+                    LockFileEx(
+                        handle,
+                        LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                        0,
+                        l_len,
+                        0,
+                        &mut overlapped,
+                    )
+                }
+            }
+        };
+
+        if result != 0 {
+            info!("lock acquired");
+            return Ok(());
+        }
+
+        if started_at.elapsed() > timeout {
+            return Err(Error::LockTimedOut);
+        }
+
+        // Brief sleep before retry
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
