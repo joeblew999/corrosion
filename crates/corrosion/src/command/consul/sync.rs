@@ -2,7 +2,6 @@ use consul_client::{AgentCheck, AgentService, Client};
 use corro_api_types::ColumnType;
 use corro_client::CorrosionClient;
 use corro_types::{api::Statement, config::ConsulConfig};
-use futures::future::select;
 use metrics::{counter, histogram};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -12,10 +11,9 @@ use std::{
     path::Path,
     time::{Duration, Instant, SystemTime},
 };
-use tokio::{
-    signal::unix::{signal, SignalKind},
-    time::{interval, timeout},
-};
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
+use tokio::time::{interval, timeout};
 use tracing::{debug, error, info, trace};
 
 const CONSUL_PULL_INTERVAL: Duration = Duration::from_secs(1);
@@ -25,15 +23,10 @@ pub async fn run<P: AsRef<Path>>(
     api_addr: SocketAddr,
     db_path: P,
 ) -> eyre::Result<()> {
+    #[cfg(unix)]
     let mut sigterm = signal(SignalKind::terminate())?;
+    #[cfg(unix)]
     let mut sigint = signal(SignalKind::interrupt())?;
-
-    let sigterm_recv = sigterm.recv();
-    tokio::pin!(sigterm_recv);
-    let sigint_recv = sigint.recv();
-    tokio::pin!(sigint_recv);
-
-    let mut stop_signal = select(sigterm_recv, sigint_recv);
 
     let node: &'static str = Box::leak(
         hostname::get()?
@@ -90,12 +83,27 @@ pub async fn run<P: AsRef<Path>>(
 
     info!("Starting consul pull interval");
     loop {
+        #[cfg(unix)]
         let res = tokio::select! {
             _ = pull_interval.tick() => {
                 update_consul(&consul, node, &corrosion, &mut consul_services, &mut consul_checks, false).await
             },
-            _ = &mut stop_signal => {
-                debug!("tripped consul loop");
+            _ = sigterm.recv() => {
+                debug!("tripped consul loop (SIGTERM)");
+                break;
+            }
+            _ = sigint.recv() => {
+                debug!("tripped consul loop (SIGINT)");
+                break;
+            }
+        };
+        #[cfg(windows)]
+        let res = tokio::select! {
+            _ = pull_interval.tick() => {
+                update_consul(&consul, node, &corrosion, &mut consul_services, &mut consul_checks, false).await
+            },
+            _ = tokio::signal::ctrl_c() => {
+                debug!("tripped consul loop (Ctrl+C)");
                 break;
             }
         };

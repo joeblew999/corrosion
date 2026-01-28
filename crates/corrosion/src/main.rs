@@ -19,9 +19,11 @@ use corro_types::{
     actor::{ActorId, ClusterId},
     api::{ExecResult, QueryEvent, Statement},
     base::CrsqlDbVersion,
-    config::{default_admin_path, Config, ConfigError, LogFormat, OtelConfig},
+    config::{Config, ConfigError, LogFormat, OtelConfig},
     sqlite::CrConn,
 };
+#[cfg(unix)]
+use corro_types::config::default_admin_path;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use opentelemetry::{global, KeyValue};
@@ -260,7 +262,7 @@ async fn process_cli(cli: Cli) -> eyre::Result<()> {
             self_actor_id,
             actor_id,
         } => {
-            if AdminConn::connect(cli.admin_path()).await.is_ok() {
+            if cli.admin_connect().await.is_ok() {
                 eyre::bail!("corrosion is currently running, shut it down before restoring!");
             }
 
@@ -361,28 +363,28 @@ async fn process_cli(cli: Cli) -> eyre::Result<()> {
             }
         }
         Command::Cluster(ClusterCommand::Rejoin) => {
-            let mut conn = AdminConn::connect(cli.admin_path()).await?;
+            let mut conn = cli.admin_connect().await?;
             conn.send_command(corro_admin::Command::Cluster(
                 corro_admin::ClusterCommand::Rejoin,
             ))
             .await?;
         }
         Command::Cluster(ClusterCommand::Members) => {
-            let mut conn = AdminConn::connect(cli.admin_path()).await?;
+            let mut conn = cli.admin_connect().await?;
             conn.send_command(corro_admin::Command::Cluster(
                 corro_admin::ClusterCommand::Members,
             ))
             .await?;
         }
         Command::Cluster(ClusterCommand::MembershipStates) => {
-            let mut conn = AdminConn::connect(cli.admin_path()).await?;
+            let mut conn = cli.admin_connect().await?;
             conn.send_command(corro_admin::Command::Cluster(
                 corro_admin::ClusterCommand::MembershipStates,
             ))
             .await?;
         }
         Command::Cluster(ClusterCommand::SetId { cluster_id }) => {
-            let mut conn = AdminConn::connect(cli.admin_path()).await?;
+            let mut conn = cli.admin_connect().await?;
             conn.send_command(corro_admin::Command::Cluster(
                 corro_admin::ClusterCommand::SetId(ClusterId(*cluster_id)),
             ))
@@ -487,21 +489,21 @@ async fn process_cli(cli: Cli) -> eyre::Result<()> {
             command::reload::run(cli.api_addr()?, &cli.config()?.db.schema_paths).await?
         }
         Command::Sync(SyncCommand::Generate) => {
-            let mut conn = AdminConn::connect(cli.admin_path()).await?;
+            let mut conn = cli.admin_connect().await?;
             conn.send_command(corro_admin::Command::Sync(
                 corro_admin::SyncCommand::Generate,
             ))
             .await?;
         }
         Command::Sync(SyncCommand::ReconcileGaps) => {
-            let mut conn = AdminConn::connect(cli.admin_path()).await?;
+            let mut conn = cli.admin_connect().await?;
             conn.send_command(corro_admin::Command::Sync(
                 corro_admin::SyncCommand::ReconcileGaps,
             ))
             .await?;
         }
         Command::Locks { top } => {
-            let mut conn = AdminConn::connect(cli.admin_path()).await?;
+            let mut conn = cli.admin_connect().await?;
             conn.send_command(corro_admin::Command::Locks { top: *top })
                 .await?;
         }
@@ -520,7 +522,7 @@ async fn process_cli(cli: Cli) -> eyre::Result<()> {
             }
         },
         Command::Actor(ActorCommand::Version { actor_id, version }) => {
-            let mut conn = AdminConn::connect(cli.admin_path()).await?;
+            let mut conn = cli.admin_connect().await?;
             conn.send_command(corro_admin::Command::Actor(
                 corro_admin::ActorCommand::Version {
                     actor_id: ActorId(*actor_id),
@@ -564,7 +566,7 @@ async fn process_cli(cli: Cli) -> eyre::Result<()> {
             std::process::exit(exit.code().unwrap_or(1));
         }
         Command::Subs(SubsCommand::Info { hash, id }) => {
-            let mut conn = AdminConn::connect(cli.admin_path()).await?;
+            let mut conn = cli.admin_connect().await?;
             conn.send_command(corro_admin::Command::Subs(corro_admin::SubsCommand::Info {
                 hash: hash.clone(),
                 id: *id,
@@ -572,19 +574,19 @@ async fn process_cli(cli: Cli) -> eyre::Result<()> {
             .await?;
         }
         Command::Subs(SubsCommand::List) => {
-            let mut conn = AdminConn::connect(cli.admin_path()).await?;
+            let mut conn = cli.admin_connect().await?;
             conn.send_command(corro_admin::Command::Subs(corro_admin::SubsCommand::List))
                 .await?;
         }
         Command::Log(LogCommand::Set { filter }) => {
-            let mut conn = AdminConn::connect(cli.admin_path()).await?;
+            let mut conn = cli.admin_connect().await?;
             conn.send_command(corro_admin::Command::Log(corro_admin::LogCommand::Set {
                 filter: filter.clone(),
             }))
             .await?;
         }
         Command::Log(LogCommand::Reset) => {
-            let mut conn = AdminConn::connect(cli.admin_path()).await?;
+            let mut conn = cli.admin_connect().await?;
             conn.send_command(corro_admin::Command::Log(corro_admin::LogCommand::Reset))
                 .await?;
         }
@@ -626,8 +628,13 @@ struct Cli {
     #[arg(long, global = true)]
     db_path: Option<Utf8PathBuf>,
 
+    #[cfg(unix)]
     #[arg(long, global = true)]
     admin_path: Option<Utf8PathBuf>,
+
+    #[cfg(windows)]
+    #[arg(long, global = true)]
+    admin_port: Option<u16>,
 
     #[command(subcommand)]
     command: Command,
@@ -659,6 +666,7 @@ impl Cli {
         })
     }
 
+    #[cfg(unix)]
     fn admin_path(&self) -> Utf8PathBuf {
         if let Some(ref admin_path) = self.admin_path {
             admin_path.clone()
@@ -667,6 +675,27 @@ impl Cli {
         } else {
             default_admin_path()
         }
+    }
+
+    #[cfg(windows)]
+    fn admin_port(&self) -> u16 {
+        if let Some(admin_port) = self.admin_port {
+            admin_port
+        } else if let Ok(config) = Config::load(self.config_path.as_str()) {
+            config.admin.port
+        } else {
+            9090 // Default Windows admin port
+        }
+    }
+
+    #[cfg(unix)]
+    async fn admin_connect(&self) -> eyre::Result<AdminConn> {
+        AdminConn::connect(self.admin_path()).await
+    }
+
+    #[cfg(windows)]
+    async fn admin_connect(&self) -> eyre::Result<AdminConn> {
+        AdminConn::connect_tcp(self.admin_port()).await
     }
 
     fn config(&self) -> Result<Config, ConfigError> {
