@@ -103,14 +103,33 @@ pub enum OtelConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminConfig {
+    #[cfg(unix)]
     #[serde(alias = "path")]
     pub uds_path: Utf8PathBuf,
+    #[cfg(windows)]
+    #[serde(default = "default_admin_port")]
+    pub port: u16,
 }
 
+#[cfg(windows)]
+fn default_admin_port() -> u16 {
+    9090
+}
+
+#[cfg(unix)]
 impl Default for AdminConfig {
     fn default() -> Self {
         Self {
             uds_path: default_admin_path(),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            port: default_admin_port(),
         }
     }
 }
@@ -454,8 +473,13 @@ impl ConfigBuilder {
                 member_id: self.member_id,
             },
             perf: self.perf.unwrap_or_default(),
+            #[cfg(unix)]
             admin: AdminConfig {
                 uds_path: self.admin_path.unwrap_or_else(default_admin_path),
+            },
+            #[cfg(windows)]
+            admin: AdminConfig {
+                port: default_admin_port(),
             },
             telemetry,
             log: self.log.unwrap_or_default(),

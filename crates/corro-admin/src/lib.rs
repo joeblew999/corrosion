@@ -19,8 +19,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use spawn::spawn_counted;
 use time::OffsetDateTime;
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use tokio::net::{TcpListener, TcpStream};
 use tokio::{
-    net::{UnixListener, UnixStream},
     sync::{mpsc, oneshot},
     task::block_in_place,
 };
@@ -40,12 +43,17 @@ pub enum AdminError {
 
 #[derive(Debug, Clone)]
 pub struct AdminConfig {
+    /// Unix socket path (Unix) or TCP port (Windows)
+    #[cfg(unix)]
     pub listen_path: Utf8PathBuf,
+    #[cfg(windows)]
+    pub listen_port: u16,
     pub config_path: Utf8PathBuf,
 }
 
 pub type TracingHandle = ReloadHandle<FilterLayer<Filter>, Registry>;
 
+#[cfg(unix)]
 pub fn start_server(
     agent: Agent,
     bookie: Bookie,
@@ -61,6 +69,60 @@ pub fn start_server(
     }
 
     let ln = UnixListener::bind(&config.listen_path)?;
+
+    spawn_counted(async move {
+        loop {
+            let stream = tokio::select! {
+                accept_res = ln.accept() => match accept_res {
+                    Ok((stream, _addr)) => stream,
+                    Err(e) => {
+                        error!("error accepting for admin connections: {e}");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                },
+                _ = &mut tripwire => {
+                    info!("Admin tripped!");
+                    break;
+                }
+            };
+
+            tokio::spawn({
+                let agent = agent.clone();
+                let bookie = bookie.clone();
+                let config = config.clone();
+                let tracing_handle = tracing_handle.clone();
+                async move {
+                    if let Err(e) =
+                        handle_conn(agent, &bookie, config, stream, tracing_handle).await
+                    {
+                        error!("could not handle admin connection: {e}");
+                    }
+                }
+            });
+        }
+        info!("Admin is done.")
+    });
+
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn start_server(
+    agent: Agent,
+    bookie: Bookie,
+    config: AdminConfig,
+    tracing_handle: Option<TracingHandle>,
+    mut tripwire: Tripwire,
+) -> Result<(), AdminError> {
+    use std::net::SocketAddr;
+
+    let addr: SocketAddr = format!("127.0.0.1:{}", config.listen_port).parse().unwrap();
+    info!("Starting Corrosion admin TCP server at {}", addr);
+
+    let ln = std::net::TcpListener::bind(addr)?;
+    ln.set_nonblocking(true)?;
+    let ln = TcpListener::from_std(ln)?;
 
     spawn_counted(async move {
         loop {
@@ -183,8 +245,8 @@ pub enum Response {
     Json(serde_json::Value),
 }
 
-type FramedStream = Framed<
-    tokio_util::codec::Framed<UnixStream, LengthDelimitedCodec>,
+type FramedStream<S> = Framed<
+    tokio_util::codec::Framed<S, LengthDelimitedCodec>,
     Command,
     Response,
     Json<Command, Response>,
@@ -209,6 +271,8 @@ impl From<LockMeta> for LockMetaElapsed {
     }
 }
 
+#[cfg(unix)]
+#[cfg(unix)]
 async fn handle_conn(
     agent: Agent,
     bookie: &Bookie,
@@ -216,8 +280,31 @@ async fn handle_conn(
     stream: UnixStream,
     tracing_handle: Option<TracingHandle>,
 ) -> Result<(), AdminError> {
+    handle_conn_inner(agent, bookie, stream, tracing_handle).await
+}
+
+#[cfg(windows)]
+async fn handle_conn(
+    agent: Agent,
+    bookie: &Bookie,
+    _config: AdminConfig,
+    stream: TcpStream,
+    tracing_handle: Option<TracingHandle>,
+) -> Result<(), AdminError> {
+    handle_conn_inner(agent, bookie, stream, tracing_handle).await
+}
+
+async fn handle_conn_inner<S>(
+    agent: Agent,
+    bookie: &Bookie,
+    stream: S,
+    tracing_handle: Option<TracingHandle>,
+) -> Result<(), AdminError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     // wrap in stream in line delimited json decoder
-    let mut stream: FramedStream = tokio_serde::Framed::new(
+    let mut stream: FramedStream<S> = tokio_serde::Framed::new(
         tokio_util::codec::Framed::new(
             stream,
             LengthDelimitedCodec::builder()
@@ -620,13 +707,19 @@ pub enum BackupError {
     Sqlite(#[from] rusqlite::Error),
 }
 
-async fn send(stream: &mut FramedStream, res: Response) {
+async fn send<S>(stream: &mut FramedStream<S>, res: Response)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     if let Err(e) = stream.send(res).await {
         warn!("could not send response=: {e}");
     }
 }
 
-async fn send_log<M: Into<String>>(stream: &mut FramedStream, level: LogLevel, msg: M) {
+async fn send_log<S, M: Into<String>>(stream: &mut FramedStream<S>, level: LogLevel, msg: M)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     send(
         stream,
         Response::Log {
@@ -638,18 +731,31 @@ async fn send_log<M: Into<String>>(stream: &mut FramedStream, level: LogLevel, m
     .await
 }
 
-async fn info_log<M: Into<String>>(stream: &mut FramedStream, msg: M) {
+async fn info_log<S, M: Into<String>>(stream: &mut FramedStream<S>, msg: M)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     send_log(stream, LogLevel::Info, msg).await
 }
-async fn debug_log<M: Into<String>>(stream: &mut FramedStream, msg: M) {
+
+async fn debug_log<S, M: Into<String>>(stream: &mut FramedStream<S>, msg: M)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     send_log(stream, LogLevel::Debug, msg).await
 }
 
-async fn send_success(stream: &mut FramedStream) {
+async fn send_success<S>(stream: &mut FramedStream<S>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     send(stream, Response::Success).await
 }
 
-async fn send_error<E: Display>(stream: &mut FramedStream, error: E) {
+async fn send_error<S, E: Display>(stream: &mut FramedStream<S>, error: E)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     send(
         stream,
         Response::Error {
@@ -665,11 +771,14 @@ fn get_gaps_actor_ids(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Actor
         .collect::<Result<Vec<_>, _>>()
 }
 
-async fn collapse_gaps(
-    stream: &mut FramedStream,
+async fn collapse_gaps<S>(
+    stream: &mut FramedStream<S>,
     conn: &mut rusqlite::Connection,
     bv: &mut BookedVersions,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let actor_id = bv.actor_id();
     let mut snap = bv.snapshot();
     _ = info_log(stream, format!("collapsing ranges for {actor_id}")).await;

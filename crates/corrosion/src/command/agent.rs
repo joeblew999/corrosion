@@ -66,11 +66,24 @@ pub async fn run(
             .await
             .expect("could not start agent");
 
+    #[cfg(unix)]
     corro_admin::start_server(
         agent.clone(),
         bookie.clone(),
         AdminConfig {
             listen_path: config.admin.uds_path.clone(),
+            config_path: config_path.clone(),
+        },
+        tracing_handle,
+        tripwire,
+    )?;
+
+    #[cfg(windows)]
+    corro_admin::start_server(
+        agent.clone(),
+        bookie.clone(),
+        AdminConfig {
+            listen_port: 9090, // Default Windows admin port
             config_path: config_path.clone(),
         },
         tracing_handle,
